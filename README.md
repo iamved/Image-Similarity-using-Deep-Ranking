@@ -29,4 +29,4 @@ Triplet Sampling Layer
 One of the main contributions of the paper is the triplet sampling layer. Sampling the query image (randomly) and the positive sample image (randomly from the same class as the query image) are quite straightforward.
 Negative samples are composed of two different types of samples: in-class and out-of-class. For this project, we will implement out-of-class samples only. Again, out-of-class samples are images sampled randomly from any class except the class of the query image.
 
-Results:- Got precision score of 82% for image retrieving
+Results:- Got precision score of 82% for image retrieving.
