@@ -1,382 +1,245 @@
 
 # coding: utf-8
 
-import os
-import sys
-import time
-import random
-import zipfile
+# coding: utf-8
 
-import numpy as np
+# In[47]:
+
+
+from __future__ import print_function, division
 from PIL import Image
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as functional
-from torch.autograd import Variable
-import torchvision
-from torchvision import transforms, models
 import torch.optim as optim
-from torch.utils.data import Dataset
+from torch.optim import lr_scheduler
+import numpy as np
+import torchvision
+from torchvision import datasets, models, transforms
+import time
+import os
+import copy
+import torch.utils.data as data
 import matplotlib.pyplot as plt
-# from IPython.display import Image, display, HTML
-#
-from matplotlib.pyplot import figure, imshow, axis
-from matplotlib.image import imread
+import os.path
+import sys
+from torch.utils.data import Dataset
+import random
+from torch.autograd import Variable
 
+f=open('tiny-imagenet-200/val/val_annotations.txt',"r")
+lines=f.readlines()
+result=[]
+val_label =[]
+val_label_dict ={}
+for x in lines:
+    words =x.split()
+    class_label = words[1]
+    image_label =words[0]
+    val_label_dict[image_label]=class_label
+    val_label.append(class_label)
+f.close()
+val_label_dict
+#this is the code for triplet sampling
 
-# mkdir data
+def has_file_allowed_extension(filename, extensions):
+    
+    filename_lower = filename.lower()
+    return any(filename_lower.endswith(ext) for ext in extensions)
 
-# Extracting data from zipfile
-# PATH=os.path.join(os.getcwd(),'tiny-imagenet-200.zip')
-# DIST=os.path.join(os.getcwd(),'data')
+def is_image_file(filename):
+    return has_file_allowed_extension(filename, IMG_EXTENSIONS)
 
-# with zipfile.ZipFile(PATH) as zf:
-#     zf.extractall(DIST)
-
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-
-normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])
-
-
-train_transform = transforms.Compose([transforms.Resize(size=(224,224)),
-                                      transforms.RandomHorizontalFlip(),
-                                      transforms.ToTensor(),
-                                      normalize])
-
-
-test_transform = transforms.Compose([transforms.Resize(size=(224,224)),
-                                     transforms.ToTensor(),
-                                     normalize])
-
-# Hyper parameters
-num_epochs = 10
-num_classes = 200
-batch_size = 16
-learning_rate = 0.001
-
-def classes_to_id(folder):
-    folder = os.path.join(folder, 'train')
-    classes = [d for d in os.listdir(folder) if os.path.isdir(os.path.join(folder, d))]
-    classes.sort()
-    class_dict = {classes[i]: i for i in range(len(classes))}
-    return classes, class_dict
-
-def load_images(folder, class_dict):
-    folder = os.path.join(folder, 'train')
-    image_label = []
-    folder = os.path.expanduser(folder)
-    for target in sorted(os.listdir(folder)):
-        d = os.path.join(folder, target, 'images')
+def make_dataset(dir, class_to_idx, extensions):
+    images = []
+    dir = os.path.expanduser(dir)
+    for target in sorted(class_to_idx.keys()):
+        d = os.path.join(dir, target)
         if not os.path.isdir(d):
             continue
 
         for root, _, fnames in sorted(os.walk(d)):
             for fname in sorted(fnames):
-
-                path = os.path.join(root, fname)
-                item = (path, class_dict[target])
-                image_label.append(item)
-#     print(image_label[0])
-    return image_label
-
+                if has_file_allowed_extension(fname, extensions):
+                    path = os.path.join(root, fname)
+                    item = (path, class_to_idx[target])
+                    images.append(item)
+    return images
 
 def pil_loader(path):
+    # open path as file to avoid ResourceWarning (https://github.com/python-pillow/Pillow/issues/835)
     with open(path, 'rb') as f:
         img = Image.open(f)
         return img.convert('RGB')
-
-
-class TinyImageNetData(Dataset):
-    def __init__(self, root, loader=pil_loader, transform=None, train=True):
-
-        classes, class_dict = classes_to_id(root)
-
+IMG_EXTENSIONS = ['.jpg', '.jpeg', '.JPEG', '.png', '.ppm', '.bmp', '.pgm', '.tif']
+class ImagenetFolder(data.Dataset):
+    def __init__(self, root, loader=pil_loader, extensions=IMG_EXTENSIONS,val_label =val_label, transform=None, target_transform=None):
+        classes, class_to_idx = self._find_classes(root)
+        samples = make_dataset(root, class_to_idx, extensions)
+        if len(samples) == 0:
+            raise(RuntimeError("Found 0 files in subfolders of: " + root + "\n"
+                               "Supported extensions are: " + ",".join(extensions)))
+        samples = make_dataset(root, class_to_idx, extensions)
+        #print(type(samples))
         self.root = root
+        self.val_label =val_label
         self.loader = loader
-        self.transform = transform
+        self.extensions = extensions
         self.classes = classes
-        # Classes to folder labels mapping
-        self.class_to_idx = class_dict
-        self.train = train
-
-        if self.train:
-            self.samples = load_images(root, class_dict)
-
-            self.n = len(self.samples)
-
+        self.class_to_idx = class_to_idx
+        self.samples = samples
+        self.targets = [s[1] for s in samples]
+        self.transform = transform
+        self.target_transform = target_transform
+    def _find_classes(self, dir):
+        if sys.version_info >= (3, 5):
+            # Faster and available in Python 3.5 and above
+            classes = [d.name for d in os.scandir(dir) if d.is_dir()]
         else:
-            test_path = os.path.join(self.root, 'val')
-            self.samples = []
-            with open(os.path.join(test_path, "val_annotations.txt")) as f:
-                for line in f:
-                    info = line.split("\t")
-                    image_path = os.path.join(test_path, "images", info[0])
-                    self.samples.append((image_path, self.class_to_idx[info[1]]))
-
+            classes = [d for d in os.listdir(dir) if os.path.isdir(os.path.join(dir, d))]
+        classes.sort()
+        class_to_idx = {classes[i]: i for i in range(len(classes))}
+        return classes, class_to_idx
     def __getitem__(self, index):
-
-        if self.train:
-
-            # Choose a random sample
-            path, target = self.samples[index]
-            positive = random.randint(0, self.n -1)
-            path_pos, target_pos = self.samples[positive]
-
-            # Choose positive sample
-            while target_pos != target or positive == index:
-                positive = random.randint(0, self.n - 1)
-                path_pos, target_pos = self.samples[positive]
-
-            # Choose negative sample
-            negative = random.randint(0, self.n - 1)
-            path_neg, target_neg = self.samples[negative]
-            while target_neg == target:
-                negative = random.randint(0, self.n - 1)
-                path_neg, target_neg = self.samples[negative]
-
-            query_image = self.loader(path)
-            positive_image = self.loader(path_pos)
-            negative_image = self.loader(path_neg)
-
+        if self.root == "tiny-imagenet-200/train":
+        #print(self.samples[index])
+            path1, target1 = self.samples[index]
+        #print(path1)
+            query_image = self.loader(path1)
+        #print(query_image)
+            x = self.samples.pop(index)
+            path_list = path1.split(os.sep)
+            path_list=path_list[:-1]
+            folder_path = '/'.join(path_list)
+            same_folder =[]
+            for s in self.samples:
+                address=s[0]
+                if folder_path in address:
+                    same_folder.append(address)
+                else:
+                    negative_image_path,negative_image_target  = random.choice(self.samples)
+            positive_image =random.choice(same_folder)
+#         print(positive_image)
+            positive_image =self.loader(positive_image)
+        #print(negative_image_path)
+            negative_image = self.loader(negative_image_path)
+        #print(negative_image)
+            self.samples.append(x)
             if self.transform is not None:
                 query_image = self.transform(query_image)
-                positive_image = self.transform(positive_image)
+                positive_image = self.transform(positive_image)    
                 negative_image = self.transform(negative_image)
-
-
-            return (path, query_image, target, positive_image, target_pos, negative_image, target_neg)
-
+            
+            return query_image, positive_image, negative_image
         else:
-
             path, target = self.samples[index]
-            image = self.loader(path)
+            sample = self.loader(path)
+            path_list = path.split(os.sep)
+            image_name=path_list[-1]
+            #print(path_list)
+            target =val_label[index]
             if self.transform is not None:
-                image = self.transform(image)
-            return path, image, target
-
-
+                sample = self.transform(sample)
+            for key, value in val_label_dict.items():
+                if image_name ==key:
+                    label = value
+                    print(type(label))
+#             if self.target_transform is not None:
+#                 label = self.target_transform(label)
+#                 print(type(label))
+            return sample, label
     def __len__(self):
         return len(self.samples)
 
-train_dataset = TinyImageNetData(root='./data/tiny-imagenet-200',
-                                 transform=train_transform)
+def _find_classes(dir):
+        if sys.version_info >= (3, 5):
+            # Faster and available in Python 3.5 and above
+            classes = [d.name for d in os.scandir(dir) if d.is_dir()]
+        else:
+            classes = [d for d in os.listdir(dir) if os.path.isdir(os.path.join(dir, d))]
+        classes.sort()
+        class_to_idx = {classes[i]: i for i in range(len(classes))}
+        return classes, class_to_idx
 
-test_dataset = TinyImageNetData(root='./data/tiny-imagenet-200',
-                                transform=test_transform,
-                                train=False)
+    
+class ImageFolder(ImagenetFolder):
+    def __init__(self, root, transform=None, target_transform=None,
+                 loader=pil_loader):
+        super(ImageFolder, self).__init__(root, loader, IMG_EXTENSIONS, val_label =val_label,
+                                          transform=transform, 
+                                         target_transform=target_transform)
+        self.imgs = self.samples
 
-train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
-                                           batch_size=batch_size,
-                                           shuffle=True,
-                                           num_workers=16)
+        
+normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+transform = transforms.Compose([
+            transforms.RandomResizedCrop(224),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            normalize,
+         ])
+train = ImagenetFolder(root='tiny-imagenet-200/train',transform = transform)
+val = ImagenetFolder(root='tiny-imagenet-200/val',transform = transform)
+train_loader =torch.utils.data.DataLoader(train, batch_size=32, shuffle=True, num_workers=4)
+val_loader =torch.utils.data.DataLoader(val, batch_size=1, shuffle=True, num_workers=4)
 
-test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
-                                          batch_size=batch_size,
-                                          shuffle=False,
-                                          num_workers=16)
+resnet_ft = models.resnet101(pretrained=True)
+for param in resnet_ft.parameters():
+      param.requires_grad = False
 
+num_ftrs = resnet_ft.fc.in_features
+resnet_ft.fc = nn.Linear(num_ftrs, 4096)
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# len(test_loader)
+resnet_ft = resnet_ft.to(device)
+triplet_loss = nn.TripletMarginLoss(margin=1.0, p=2)
 
-
-embedding_size = 4096
-model = models.resnet50(pretrained=True)
-model.fc = nn.Linear(model.fc.in_features, embedding_size)
-model = model.to(device)
-
-criterion = nn.TripletMarginLoss(margin=1.0)
-
-
-optimizer = torch.optim.SGD(model.parameters(), momentum=0.9, lr=learning_rate)
-
-
-def update_lr(optimizer, lr):
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-
-# train_loss = [0.3029077, 0.1974788]
-print('======================================')
-print('.............Training started.........')
-print('======================================')
-train_loss = []
-total_step = len(train_loader)
-curr_lr = learning_rate
+optimizer = optim.Adam(filter(lambda p: p.requires_grad, resnet_ft.parameters()),
+                   lr=.0001)
+num_epochs =10
 for epoch in range(num_epochs):
-    epoch_loss = 0
-    for i, (path, query_img, label, pos_img, pos_label, neg_img, neg_label) in enumerate(train_loader):
-#         print(i)
-        query_img = query_img.to(device)
-        pos_img = pos_img.to(device)
-        neg_img = neg_img.to(device)
+    running_loss = 0.0
+    for batch_idx, (query_image,positive_image,negative_image) in enumerate(train_loader):
+        data_a, data_p, data_n = Variable(query_image), Variable(positive_image), Variable(negative_image)       
         optimizer.zero_grad()
-        query_out = model(query_img)
-        pos_out = model(pos_img)
-        neg_out = model(neg_img)
-        loss = criterion(query_out, pos_out, neg_out)
+        out_a, out_p, out_n = resnet_ft(data_a), resnet_ft(data_p), resnet_ft(data_n)
+        loss = triplet_loss(out_a, out_p, out_n)
+        #print(loss)
         loss.backward()
-        epoch_loss += loss.item()
-        optimizer.step()
-        if (i+1) % 100 == 0:
-            print ("Epoch [{}/{}], Step [{}/{}] Loss: {:.4f}"
-                   .format(epoch+1, num_epochs, i+1, total_step, loss.item()))
+        optimizer.step()        
+        running_loss += loss.item()
+        if batch_idx % 2 == 1:    # print every 2000 mini-batches
+            print('[%d, %5d] loss: %.3f' %
+                  (epoch + 1, batch_idx + 1, running_loss / 2000))
+            running_loss = 0.0
+            
+print('Finished Training')
 
-    if (epoch+1) % 5 == 0:
-        curr_lr /= 2
-        update_lr(optimizer, curr_lr)
-    if (epoch+1) % 3 == 0:
-        torch.save(model, 'model_epoch' + str(epoch+1) +'.ckpt')
-    loss_epoch = epoch_loss/len(train_loader)
-    train_loss.append(loss_epoch)
-    print('Mean Loss in epoch ', epoch+1, ' is ', loss_epoch)
+correct = 0
+total = 0
 
 
-torch.save(model.state_dict(), 'params_epoch10.ckpt')
-torch.save(model, 'model_epoch10.ckpt')
+#with torch.no_grad():
 
-# XXXXXXXXXX IMPORTANT XXXXXXXXXXXXXX
-# From this point, load the model and then work..
-# model = torch.load('model_epoch10.ckpt')
+resnet_ft.eval()
+test_acc = 0.0
+for i, batch in enumerate(val_loader):
+    print(batch)
+    images, labels =batch
+    #print(labels)
+    images = Variable(images)
+    labels = variable(labels)
+        # Predict classes using images from the test set
+    outputs = resnet_ft(images)
+    _, prediction = torch.max(outputs.data, 1)
+    test_acc += torch.sum(prediction == labels)
 
-# Calculate train feature embeddings
-model.eval()
-feature_embeddings = torch.zeros([100000, 4096])
-# images = []
-# Keep track of classes of all 100000 images
-classes = []
-paths = []
-with(torch.no_grad()):
-    for i, (path, query_img, label, pos_img, pos_label, neg_img, neg_label) in enumerate(train_loader):
-#         print(label)
-        query_img = query_img.to(device)
-        paths.extend(list(path))
-        feature_embeddings[i*16:(i+1)*16,:] = model(query_img)
-        if (i+1)% 100 == 0:
-            print('Running for Test Image ', i + 1)
-        classes.extend(label)
+    # Compute the average acc and loss over all 10000 test images
+test_acc = test_acc / 10000
+
+print(test_acc)
 
 
-feature_embeddings = feature_embeddings.to(device)
+ # Save the Model
+torch.save(resnet_ft.state_dict(), 'model_resnet.pkl')
 
-# Calculate testing accuracy
-topk = 30
-accu = []
-done_classes = []
-
-with(torch.no_grad()):
-    for i, (path, query_img, lbl) in enumerate(test_loader):
-
-        query_img = query_img.to(device)
-        test_embed = model(query_img)
-        for (path_i, image_i, lbl_i) in zip(path, test_embed, lbl):
-
-            embed_i = image_i.reshape(1,4096).repeat(100000, 1)
-            distance = torch.norm((embed_i - feature_embeddings).double(), 2, 1, True)
-            distance = np.squeeze(distance.cpu().numpy())
-            # print(distance[:2])
-            topk_img = distance.argsort()[:topk]
-            accuracy = (np.array(classes)[topk_img] == lbl_i).sum()
-            # print(accuracy.item())
-            print(topk_img)
-            accu.append(accuracy)
-            # if lbl_i not in done_classes and len(done_classes) < 5:
-            #     done_classes.append(lbl_i)
-            #     Image.open(path_i)
-            #     top10 = topk_img[:10]
-            #     for i in range(10):
-            #         Image.open(paths[top10[i]])
-            #         print(distance[top10[i]])
-            #     bottom10 = distance.argsort()[-10:]
-            #     for i in range(10):
-            #         Image.open(paths[bottom10[i]])
-            #         print(distance[bottom10[i]])
-print(np.mean(accu)/ 30)
-
-
-print('The mean accuracy is ', np.mean(accu)/ 30*100)
-
-
-# test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
-#                                           batch_size=batch_size,
-#                                           shuffle=False,
-#                                           num_workers=4)
-
-# Get top 10 bottom 10 image paths
-topk = 30
-done_classes = []
-top_img = []
-bottom_img = []
-with(torch.no_grad()):
-    for i, (path, query_img, lbl) in enumerate(test_loader):
-        if i < 2:
-            query_img = query_img.to(device)
-            test_embed = model(query_img)
-            for (path_i, image_i, lbl_i) in zip(path, test_embed, lbl):
-                # print(lbl_i)
-                embed_i = image_i.reshape(1,4096).repeat(100000, 1)
-                distance = torch.norm((embed_i - feature_embeddings).double(), 2, 1, True)
-                distance = np.squeeze(distance.cpu().numpy())
-
-                topk_img = distance.argsort()[:topk]
-
-                if lbl_i not in done_classes and len(done_classes) < 5:
-                    done_classes.append(lbl_i)
-                    top_img.append([path_i, 0])
-                    bottom_img.append([path_i, 0])
-                    top10 = topk_img[:10]
-                    for j in range(10):
-                        top_img.append([paths[top10[j]], distance[top10[j]]])
-#                         print()
-                    bottom10 = distance.argsort()[-10:]
-                    for j in range(10):
-                        bottom_img.append([paths[bottom10[j]], distance[bottom10[j]]])
-
-# print(np.mean(accu)/ 30)
-def showImagesHorizontally(list_of_files, list_of_files2):
-    fig = figure()
-    number_of_files = len(list_of_files)
-    for i in range(number_of_files):
-        a=fig.add_subplot(2,number_of_files,i+1)
-        image = imread(list_of_files[i][0])
-        imshow(image)
-        a.set_title(round(list_of_files[i][1],3), fontsize=10)
-        axis('off')
-    for j in range(number_of_files):
-        a=fig.add_subplot(2,number_of_files,i+j+2)
-        image = imread(list_of_files2[j][0])
-        imshow(image)
-        a.set_title(round(list_of_files2[j][1],3), fontsize=10)
-        axis('off')
-    # plt.show()
-
-showImagesHorizontally(top_img[44:], bottom_img[44:])
-
-
-# train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
-#                                            batch_size=batch_size,
-#                                            shuffle=True,
-#                                            num_workers=4)
-
-# Training precision code, takes toooooooooooo long
-topk = 30
-train_accu = []
-
-with(torch.no_grad()):
-    for i, (path, query_img, label, pos_img, pos_label, neg_img, neg_label) in enumerate(train_loader):
-
-        query_img = query_img.to(device)
-        test_embed = model(query_img)
-        print('============')
-        print(np.mean(train_accu)/30)
-        for (path_i, image_i, lbl_i) in zip(path, test_embed, label):
-            embed_i = image_i.reshape(1,4096).repeat(100000, 1)
-            distance = torch.norm((embed_i - feature_embeddings).double(), 2, 1, True)
-            distance = np.squeeze(distance.cpu().numpy())
-            topk_img = distance.argsort()[:topk]
-            accuracy = (np.array(classes)[topk_img] == lbl_i).sum()
-
-            train_accu.append(accuracy)
-
-print(np.mean(train_accu)/30)
